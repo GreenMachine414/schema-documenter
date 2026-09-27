@@ -1,0 +1,61 @@
+name: Build executables
+
+# Runs on every push of a version tag (v1.0.0, ...) and on demand from the
+# Actions tab. Tag builds also attach the executables to a GitHub Release.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            asset: SchemaDocumenter-windows.zip
+          - os: macos-latest
+            asset: SchemaDocumenter-macos.zip
+          - os: ubuntu-latest
+            asset: SchemaDocumenter-linux.tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: pytest -q
+
+      - name: Build executable
+        run: pyinstaller schemadoc.spec --noconfirm --clean
+
+      - name: Package
+        shell: bash
+        run: |
+          cd dist
+          case "${{ runner.os }}" in
+            Windows) 7z a "../${{ matrix.asset }}" SchemaDocumenter.exe ;;
+            macOS)   ditto -c -k --keepParent SchemaDocumenter.app "../${{ matrix.asset }}" ;;
+            Linux)   tar -czf "../${{ matrix.asset }}" SchemaDocumenter ;;
+          esac
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.asset }}

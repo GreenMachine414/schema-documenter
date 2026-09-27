@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "schema-documenter"
+version = "1.0.0"
+description = "Generate an ERD and a schema reference (HTML or PDF) from selected database tables."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = ["SQLAlchemy>=2.0,<3", "reportlab>=4.0"]
+
+[project.optional-dependencies]
+postgres = ["psycopg[binary]>=3.1"]
+mysql = ["PyMySQL>=1.1"]
+mssql = ["pymssql>=2.3"]
+all = ["psycopg[binary]>=3.1", "PyMySQL>=1.1", "pymssql>=2.3"]
+dev = ["pyinstaller>=6.6", "pytest>=8", "pypdf>=4"]
+
+[project.scripts]
+schemadoc = "schemadoc.cli:main"
+
+[project.gui-scripts]
+schema-documenter = "schemadoc.gui:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
