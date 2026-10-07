@@ -5,6 +5,7 @@ SQL Server, SQLite, Oracle, ...) as long as the driver is installed.
 """
 from __future__ import annotations
 
+import copy
 from typing import Iterable, Optional
 
 from sqlalchemy import create_engine, inspect
@@ -88,6 +89,9 @@ class SchemaReader:
 
     # ---------------------------------------------------------------- reading
     def _type_name(self, sa_type) -> str:
+        if getattr(sa_type, "collation", None):  # show NVARCHAR(50), not NVARCHAR(50) COLLATE ...
+            sa_type = copy.copy(sa_type)
+            sa_type.collation = None
         try:
             return sa_type.compile(dialect=self.engine.dialect)
         except Exception:
@@ -96,72 +100,17 @@ class SchemaReader:
             except Exception:
                 return type(sa_type).__name__
 
-    def read_table(self, name: str, schema: Optional[str] = None) -> Table:
-        insp = self.inspector
-        table = Table(name=name, schema=schema)
+    def _multi(self, method: str, schema: Optional[str], names: list[str]) -> dict:
+        """Run one batched inspector call, returning {table_name: result}.
 
-        pk = insp.get_pk_constraint(name, schema=schema) or {}
-        table.primary_key = list(pk.get("constrained_columns") or [])
-        table.primary_key_name = pk.get("name")
-
-        for fk in insp.get_foreign_keys(name, schema=schema):
-            opts = fk.get("options") or {}
-            table.foreign_keys.append(ForeignKey(
-                name=fk.get("name"),
-                columns=list(fk.get("constrained_columns") or []),
-                ref_table=fk.get("referred_table"),
-                ref_columns=list(fk.get("referred_columns") or []),
-                ref_schema=fk.get("referred_schema"),
-                on_delete=(opts.get("ondelete") or None),
-                on_update=(opts.get("onupdate") or None),
-            ))
-
-        for ix in insp.get_indexes(name, schema=schema):
-            cols = [c for c in (ix.get("column_names") or []) if c]
-            exprs = [e for e in (ix.get("expressions") or []) if e and e not in cols]
-            table.indexes.append(Index(
-                name=ix.get("name") or "(unnamed)",
-                columns=cols + exprs,
-                unique=bool(ix.get("unique")),
-            ))
-
+        PostgreSQL and Oracle answer each call with a single query for all
+        tables; other dialects loop internally, so results are identical.
+        """
         try:
-            for uc in insp.get_unique_constraints(name, schema=schema):
-                table.unique_constraints.append(
-                    UniqueConstraint(uc.get("name"), list(uc.get("column_names") or []))
-                )
-        except NotImplementedError:
-            pass
-
-        try:
-            table.comment = (insp.get_table_comment(name, schema=schema) or {}).get("text")
-        except NotImplementedError:
-            pass
-
-        single_unique = {tuple(ix.columns) for ix in table.indexes if ix.unique and len(ix.columns) == 1}
-        single_unique |= {tuple(u.columns) for u in table.unique_constraints if len(u.columns) == 1}
-
-        fk_targets: dict[str, str] = {}
-        for fk in table.foreign_keys:
-            for col, ref in zip(fk.columns, fk.ref_columns):
-                fk_targets[col] = f"{fk.ref_table}.{ref}"
-
-        for col in insp.get_columns(name, schema=schema):
-            cname = col["name"]
-            default = col.get("default")
-            auto = col.get("autoincrement")
-            table.columns.append(Column(
-                name=cname,
-                data_type=self._type_name(col["type"]),
-                nullable=bool(col.get("nullable", True)) and cname not in table.primary_key,
-                default=None if default is None else str(default),
-                primary_key=cname in table.primary_key,
-                unique=(cname,) in single_unique,
-                autoincrement=auto is True,
-                comment=col.get("comment"),
-                references=fk_targets.get(cname),
-            ))
-        return table
+            found = getattr(self.inspector, method)(schema=schema, filter_names=names)
+        except NotImplementedError:  # e.g. table comments on SQLite
+            return {}
+        return {name: value for (_, name), value in found.items()}
 
     def read(self, tables: Iterable[str], schema: Optional[str] = None) -> Schema:
         wanted = list(dict.fromkeys(tables))  # de-duplicate, keep order
@@ -170,7 +119,9 @@ class SchemaReader:
         if missing:
             raise ValueError("These tables were not found: " + ", ".join(missing))
 
-        docs = [self.read_table(t, schema) for t in wanted]
+        parts = {kind: self._multi(f"get_multi_{kind}", schema, wanted) for kind in
+                 ("columns", "pk_constraint", "foreign_keys", "indexes", "unique_constraints", "table_comment")}
+        docs = [self._build_table(t, schema, {k: v.get(t) for k, v in parts.items()}) for t in wanted]
         return Schema(
             database=self.database_name,
             dialect=self.dialect,
@@ -179,6 +130,55 @@ class SchemaReader:
             relationships=find_relationships(docs, schema, self.default_schema()),
             server_version=self.server_version,
         )
+
+    def _build_table(self, name: str, schema: Optional[str], raw: dict) -> Table:
+        """Turn one table's reflected dictionaries into a Table."""
+        table = Table(name=name, schema=schema, comment=(raw["table_comment"] or {}).get("text"))
+
+        pk = raw["pk_constraint"] or {}
+        table.primary_key = list(pk.get("constrained_columns") or [])
+        table.primary_key_name = pk.get("name")
+
+        for fk in raw["foreign_keys"] or []:
+            opts = fk.get("options") or {}
+            table.foreign_keys.append(ForeignKey(
+                name=fk.get("name"),
+                columns=list(fk.get("constrained_columns") or []),
+                ref_table=fk.get("referred_table"),
+                ref_columns=list(fk.get("referred_columns") or []),
+                ref_schema=fk.get("referred_schema"),
+                on_delete=opts.get("ondelete") or None,
+                on_update=opts.get("onupdate") or None,
+            ))
+
+        for ix in raw["indexes"] or []:
+            cols = [c for c in (ix.get("column_names") or []) if c]
+            exprs = [e for e in (ix.get("expressions") or []) if e and e not in cols]
+            table.indexes.append(Index(ix.get("name") or "(unnamed)", cols + exprs, bool(ix.get("unique"))))
+
+        for uc in raw["unique_constraints"] or []:
+            table.unique_constraints.append(UniqueConstraint(uc.get("name"), list(uc.get("column_names") or [])))
+
+        single_unique = {tuple(ix.columns) for ix in table.indexes if ix.unique and len(ix.columns) == 1}
+        single_unique |= {tuple(u.columns) for u in table.unique_constraints if len(u.columns) == 1}
+        fk_targets = {col: f"{fk.ref_table}.{ref}" for fk in table.foreign_keys
+                      for col, ref in zip(fk.columns, fk.ref_columns)}
+
+        for col in raw["columns"] or []:
+            cname = col["name"]
+            default = col.get("default")
+            table.columns.append(Column(
+                name=cname,
+                data_type=self._type_name(col["type"]),
+                nullable=bool(col.get("nullable", True)) and cname not in table.primary_key,
+                default=None if default is None else str(default),
+                primary_key=cname in table.primary_key,
+                unique=(cname,) in single_unique,
+                autoincrement=col.get("autoincrement") is True,
+                comment=col.get("comment"),
+                references=fk_targets.get(cname),
+            ))
+        return table
 
     def close(self) -> None:
         self.engine.dispose()

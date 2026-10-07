@@ -8,7 +8,8 @@ from typing import Optional
 from . import __version__
 from .canvas import erd_svg
 from .erd import layout_erd
-from .models import Schema, Table
+from .models import Schema
+from .report import Ref, Section, build_report
 
 CSS = """
 :root{
@@ -125,128 +126,82 @@ def _cols(cols) -> str:
     return ", ".join(f"<code>{_e(c)}</code>" for c in cols)
 
 
-def _table_section(t: Table, schema: Schema) -> str:
-    has_comments = any(c.comment for c in t.columns)
+def _ref(ref: Ref) -> str:
+    if ref.documented:
+        return f'<a href="#{ref.anchor}"><code>{_e(ref.text)}</code></a>'
+    return f'<code>{_e(ref.text)}</code> <span class="ext">(not documented)</span>'
+
+
+def _grid(head: list[str], rows: list[list[str]]) -> str:
+    th = "".join(f"<th>{h}</th>" for h in head)
+    body = "".join("<tr>" + "".join(f"<td>{c}</td>" for c in r) + "</tr>" for r in rows)
+    return f"<div class='scroll'><table><thead><tr>{th}</tr></thead><tbody>{body}</tbody></table></div>"
+
+
+def _section(s: Section) -> str:
+    head = ["#", "Column", "Type", "Nullable", "Default", "Keys", "References"] + (["Comment"] if s.has_comments else [])
     rows = []
-    for i, c in enumerate(t.columns, 1):
-        keys = []
-        if c.primary_key:
-            keys.append('<span class="k pk">PK</span>')
-        if c.foreign_key:
-            keys.append('<span class="k fk">FK</span>')
-        if c.unique and not c.primary_key:
-            keys.append('<span class="k uq">UQ</span>')
-        ref = ""
-        if c.references:
-            tname, _, col = c.references.partition(".")
-            target = schema.table(tname)
-            ref = (f'<a href="#{target.anchor}"><code>{_e(c.references)}</code></a>' if target
-                   else f'<code>{_e(c.references)}</code> <span class="ext">(not documented)</span>')
-        extra = " <span class='ext'>auto</span>" if c.autoincrement else ""
-        rows.append(
-            f"<tr><td class='nn'>{i}</td><td class='id'>{_e(c.name)}</td>"
-            f"<td class='type'>{_e(c.data_type)}{extra}</td>"
-            f"<td>{'Yes' if c.nullable else '<span class=nn>No</span>'}</td>"
-            f"<td class='type'>{_e(c.default) if c.default is not None else ''}</td>"
-            f"<td>{''.join(keys)}</td><td>{ref}</td>"
-            + (f"<td>{_e(c.comment)}</td>" if has_comments else "") + "</tr>"
-        )
-    head = "<th>#</th><th>Column</th><th>Type</th><th>Nullable</th><th>Default</th><th>Keys</th><th>References</th>"
-    head += "<th>Comment</th>" if has_comments else ""
-    cols_html = f"<div class='scroll'><table><thead><tr>{head}</tr></thead><tbody>{''.join(rows)}</tbody></table></div>"
+    for c in s.columns:
+        row = [f"<span class='nn'>{c.position}</span>",
+               f"<span class='id'>{_e(c.name)}</span>",
+               f"<span class='type'>{_e(c.data_type)}</span>" + (" <span class='ext'>auto</span>" if c.autoincrement else ""),
+               "Yes" if c.nullable else "<span class='nn'>No</span>",
+               f"<span class='type'>{_e(c.default)}</span>" if c.default is not None else "",
+               "".join(f'<span class="k {k.lower()}">{k}</span>' for k in c.keys),
+               _ref(c.ref) if c.ref else ""]
+        rows.append(row + ([_e(c.comment)] if s.has_comments else []))
 
-    pk = (f"<p class='none' style='color:var(--ink)'>{_cols(t.primary_key)}"
-          f"{' &nbsp;<span class=ext>' + _e(t.primary_key_name) + '</span>' if t.primary_key_name else ''}</p>"
-          if t.primary_key else "<p class='none'>No primary key.</p>")
-
-    if t.foreign_keys:
-        fk_rows = []
-        for fk in t.foreign_keys:
-            target = schema.table(fk.ref_table)
-            ref_name = f"{fk.ref_schema + '.' if fk.ref_schema else ''}{fk.ref_table}"
-            ref_html = (f'<a href="#{target.anchor}"><code>{_e(ref_name)}</code></a>' if target
-                        else f'<code>{_e(ref_name)}</code> <span class="ext">(not documented)</span>')
-            rules = " / ".join(x for x in [
-                f"on delete {fk.on_delete.lower()}" if fk.on_delete else "",
-                f"on update {fk.on_update.lower()}" if fk.on_update else ""] if x)
-            fk_rows.append(f"<tr><td class='id'>{_e(fk.name or '(unnamed)')}</td><td>{_cols(fk.columns)}</td>"
-                           f"<td>{ref_html} ({_cols(fk.ref_columns)})</td><td class='nn'>{_e(rules)}</td></tr>")
-        fks = ("<div class='scroll'><table><thead><tr><th>Name</th><th>Columns</th><th>References</th>"
-               f"<th>Rules</th></tr></thead><tbody>{''.join(fk_rows)}</tbody></table></div>")
+    if s.primary_key:
+        pk_name = f" &nbsp;<span class=ext>{_e(s.primary_key_name)}</span>" if s.primary_key_name else ""
+        pk = f"<p class='none' style='color:var(--ink)'>{_cols(s.primary_key)}{pk_name}</p>"
     else:
-        fks = "<p class='none'>No foreign keys.</p>"
+        pk = "<p class='none'>No primary key.</p>"
 
-    if t.indexes:
-        ix_rows = "".join(
-            f"<tr><td class='id'>{_e(ix.name)}</td><td>{_cols(ix.columns)}</td>"
-            f"<td>{'Unique' if ix.unique else '<span class=nn>Non-unique</span>'}</td></tr>"
-            for ix in t.indexes)
-        ixs = ("<div class='scroll'><table><thead><tr><th>Name</th><th>Columns</th><th>Type</th></tr></thead>"
-               f"<tbody>{ix_rows}</tbody></table></div>")
-    else:
-        ixs = "<p class='none'>No secondary indexes.</p>"
+    fks = _grid(["Name", "Columns", "References", "Rules"],
+                [[f"<span class='id'>{_e(f.name)}</span>", _cols(f.columns),
+                  f"{_ref(f.target)} ({_cols(f.target_columns)})", f"<span class='nn'>{_e(f.rules)}</span>"]
+                 for f in s.foreign_keys]) if s.foreign_keys else "<p class='none'>No foreign keys.</p>"
 
-    uqs = ""
-    if t.unique_constraints:
-        uq_rows = "".join(f"<tr><td class='id'>{_e(u.name or '(unnamed)')}</td><td>{_cols(u.columns)}</td></tr>"
-                          for u in t.unique_constraints)
-        uqs = ("<h4>Unique constraints</h4><div class='scroll'><table><thead><tr><th>Name</th><th>Columns</th>"
-               f"</tr></thead><tbody>{uq_rows}</tbody></table></div>")
+    ixs = _grid(["Name", "Columns", "Type"],
+                [[f"<span class='id'>{_e(ix.name)}</span>", _cols(ix.columns),
+                  "Unique" if ix.unique else "<span class='nn'>Non-unique</span>"]
+                 for ix in s.indexes]) if s.indexes else "<p class='none'>No secondary indexes.</p>"
 
-    comment = f"<p class='comment'>{_e(t.comment)}</p>" if t.comment else ""
+    uqs = ("<h4>Unique constraints</h4>" + _grid(["Name", "Columns"],
+           [[f"<span class='id'>{_e(u.name)}</span>", _cols(u.columns)] for u in s.uniques])) if s.uniques else ""
+
+    comment = f"<p class='comment'>{_e(s.comment)}</p>" if s.comment else ""
     return (
-        f"<section class='tbl' id='{t.anchor}' data-name='{_e(t.name.lower())}'>"
-        f"<h3>{_e(t.name)} <span class='ext'>{len(t.columns)} columns</span>"
+        f"<section class='tbl' id='{s.anchor}' data-name='{_e(s.name.lower())}'>"
+        f"<h3>{_e(s.name)} <span class='ext'>{len(s.columns)} columns</span>"
         f"<a class='top' href='#tables'>Back to table list</a></h3>{comment}"
-        f"<h4>Columns</h4>{cols_html}<h4>Primary key</h4>{pk}"
+        f"<h4>Columns</h4>{_grid(head, rows)}<h4>Primary key</h4>{pk}"
         f"<h4>Foreign keys</h4>{fks}<h4>Indexes</h4>{ixs}{uqs}</section>"
     )
 
 
 def render_html(schema: Schema, path: str | Path, title: Optional[str] = None) -> Path:
     path = Path(path)
-    title = title or f"{schema.database} schema"
-    lay = layout_erd(schema)
-    svg = erd_svg(lay, link_tables=True)
+    rep = build_report(schema, title)
+    svg = erd_svg(layout_erd(schema), link_tables=True)
 
-    meta = [f"<span>Database <b>{_e(schema.database)}</b></span>",
-            f"<span>Engine <b>{_e(schema.dialect)}{' ' + _e(schema.server_version) if schema.server_version else ''}</b></span>"]
-    if schema.schema_name:
-        meta.append(f"<span>Schema <b>{_e(schema.schema_name)}</b></span>")
-    meta.append(f"<span>Generated <b>{schema.generated_at:%Y-%m-%d %H:%M}</b></span>")
-
-    n_idx = sum(len(t.indexes) for t in schema.tables)
-    n_cols = sum(len(t.columns) for t in schema.tables)
-    stats = (f"<div><strong>{len(schema.tables)}</strong>tables</div>"
-             f"<div><strong>{n_cols}</strong>columns</div>"
-             f"<div><strong>{len(schema.relationships)}</strong>relationships</div>"
-             f"<div><strong>{n_idx}</strong>indexes</div>")
-
-    if schema.relationships:
-        rel_rows = "".join(
-            f"<tr><td><a href='#{schema.table(r.child_table).anchor}'><code>{_e(r.child_table)}</code></a> "
-            f"({_cols(r.child_columns)})</td>"
-            f"<td><a href='#{schema.table(r.parent_table).anchor}'><code>{_e(r.parent_table)}</code></a> "
-            f"({_cols(r.parent_columns)})</td>"
-            f"<td>{_e(r.cardinality)}</td><td class='id nn'>{_e(r.name or '')}</td></tr>"
-            for r in schema.relationships)
-        rels = ("<div class='scroll'><table><thead><tr><th>Table (foreign key)</th><th>Refers to</th>"
-                f"<th>Cardinality</th><th>Constraint</th></tr></thead><tbody>{rel_rows}</tbody></table></div>")
-    else:
-        rels = "<p class='none'>None of the selected tables reference each other.</p>"
-
-    toc = "".join(f"<a href='#{t.anchor}' data-name='{_e(t.name.lower())}'>{_e(t.name)}</a>"
-                  for t in schema.tables)
-    sections = "".join(_table_section(t, schema) for t in schema.tables)
+    meta = "".join(f"<span>{_e(k)} <b>{_e(v)}</b></span>" for k, v in rep.meta)
+    stats = "".join(f"<div><strong>{v}</strong>{_e(label)}</div>" for v, label in rep.stats)
+    rels = _grid(["Table (foreign key)", "Refers to", "Cardinality", "Constraint"],
+                 [[f"{_ref(r.child)} ({_cols(r.child_columns)})", f"{_ref(r.parent)} ({_cols(r.parent_columns)})",
+                   _e(r.cardinality), f"<span class='id nn'>{_e(r.name)}</span>"] for r in rep.relationships]
+                 ) if rep.relationships else "<p class='none'>None of the selected tables reference each other.</p>"
+    toc = "".join(f"<a href='#{s.anchor}' data-name='{_e(s.name.lower())}'>{_e(s.name)}</a>" for s in rep.sections)
+    sections = "".join(_section(s) for s in rep.sections)
 
     doc = f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{_e(title)}</title><style>{CSS}</style></head>
+<title>{_e(rep.title)}</title><style>{CSS}</style></head>
 <body>
 <header><div class="wrap">
-  <h1>{_e(title)}<small>Schema reference for {len(schema.tables)} selected table{'s' if len(schema.tables) != 1 else ''}</small></h1>
-  <div class="meta">{''.join(meta)}</div>
+  <h1>{_e(rep.title)}<small>{_e(rep.subtitle)}</small></h1>
+  <div class="meta">{meta}</div>
   <div class="stats">{stats}</div>
 </div></header>
 <main class="wrap">

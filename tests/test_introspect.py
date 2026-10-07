@@ -37,3 +37,15 @@ def test_cardinality(reader):
 def test_unknown_table(reader):
     with pytest.raises(ValueError):
         reader.read(["nope"])
+
+
+def test_type_names_leave_out_collation(reader):
+    from sqlalchemy import NVARCHAR
+    from sqlalchemy.dialects import mssql
+    t = NVARCHAR(50, collation="SQL_Latin1_General_CP1_CI_AS")
+    reader.engine.dialect, real = mssql.dialect(), reader.engine.dialect
+    try:
+        assert reader._type_name(t) == "NVARCHAR(50)"
+    finally:
+        reader.engine.dialect = real
+    assert t.collation == "SQL_Latin1_General_CP1_CI_AS"  # reflected type isn't modified

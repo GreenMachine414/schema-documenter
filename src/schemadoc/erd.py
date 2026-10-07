@@ -34,6 +34,7 @@ PAD = 10
 BADGE_W = 22
 MIN_BOX_W = 170
 MAX_BOX_W = 380
+MAX_ROWS = 30  # longer tables show key columns first, then "+ N more columns"
 COL_GAP = 110
 ROW_GAP = 70
 MARGIN = 40
@@ -71,7 +72,7 @@ class Row:
     type: str
     pk: bool
     fk: bool
-    nullable: bool
+    note: bool = False  # the "+ N more columns" line
     y: float = 0.0  # vertical centre, set during layout
 
 
@@ -107,11 +108,21 @@ class Layout:
     height: float
     boxes: list[Box] = field(default_factory=list)
     edges: list[Edge] = field(default_factory=list)
+    # y positions between grid rows where the diagram can be cut into pages
+    # without slicing a table or a horizontal line
+    breaks: list[float] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------- sizing
 def _make_box(t: Table) -> Box:
-    rows = [Row(c.name, c.data_type, c.primary_key, c.foreign_key, c.nullable) for c in t.columns]
+    rows = [Row(c.name, c.data_type, c.primary_key, c.foreign_key) for c in t.columns]
+    if len(rows) > MAX_ROWS:
+        # keep every key column (lines attach to them), fill up with the rest, keep table order
+        keep = {i for i, r in enumerate(rows) if r.pk or r.fk}
+        keep |= set([i for i in range(len(rows)) if i not in keep][:max(0, MAX_ROWS - 1 - len(keep))])
+        hidden = len(rows) - len(keep)
+        rows = [r for i, r in enumerate(rows) if i in keep]
+        rows.append(Row(f"+ {hidden} more columns", "", False, False, note=True))
     title_w = _w(t.name, TITLE_SIZE, True) + 2 * PAD
     name_w = max([_w(r.name, ROW_SIZE, r.pk) for r in rows] or [0])
     type_w = max([_w(r.type, ROW_SIZE) for r in rows] or [0])
@@ -176,7 +187,34 @@ def _improve(cells: dict[str, tuple[int, int]], adj: dict[str, set[str]], slots:
             break
 
 
-def layout_erd(schema: Schema) -> Layout:
+def _pick_columns(boxes: list[Box], aspect: float, max_width: Optional[float]) -> int:
+    """Choose the grid width.
+
+    With `max_width`: the most columns that fit that width.
+    Otherwise: the shape closest to `aspect` (width / height). Rows are as tall
+    as their tallest table, so heights come from the taller tables.
+    """
+    n = len(boxes)
+    avg_w = sum(b.w for b in boxes) / n
+    heights = sorted(b.h for b in boxes)
+    tall_h = heights[int(n * 0.75)] if n > 1 else heights[0]
+
+    def width(cols: int) -> float:
+        return 2 * MARGIN + cols * avg_w + (cols - 1) * COL_GAP
+
+    if max_width is not None:
+        return max([c for c in range(1, n + 1) if width(c) <= max_width], default=1)
+
+    def shape(cols: int) -> float:
+        rows = math.ceil(n / cols)
+        return width(cols) / (2 * MARGIN + rows * tall_h + (rows - 1) * ROW_GAP)
+
+    return min(range(1, n + 1), key=lambda c: abs(math.log(shape(c) / aspect)))
+
+
+def layout_erd(schema: Schema, aspect: float = 1.6, max_width: Optional[float] = None) -> Layout:
+    """Lay out the diagram, aiming for roughly `aspect` (width / height), or
+    for the most columns that fit `max_width` when that is given."""
     boxes = {t.name: _make_box(t) for t in schema.tables}
     if not boxes:
         return Layout(MARGIN * 2, MARGIN * 2)
@@ -189,7 +227,7 @@ def layout_erd(schema: Schema) -> Layout:
         adj[r.parent_table].add(r.child_table)
 
     n = len(boxes)
-    ncols = max(1, math.ceil(math.sqrt(n * 1.4)))
+    ncols = _pick_columns(list(boxes.values()), aspect, max_width)
     nrows = math.ceil(n / ncols)
     slots = [(c, r) for r in range(nrows) for c in range(ncols)]
     order = _order(list(boxes), adj)
@@ -271,7 +309,9 @@ def layout_erd(schema: Schema) -> Layout:
             pts = [(sx, sy), (x1, sy), (x1, yk), (x2, yk), (x2, ey), (ex, ey)]
         edges.append(Edge(rel, pts, sdir, edir))
 
-    return Layout(width, height, list(boxes.values()), edges)
+    # just above each row after the first: below every horizontal lane (see h_limit)
+    breaks = [y - 4 for y in row_y[1:]]
+    return Layout(width, height, list(boxes.values()), edges, breaks)
 
 
 # ---------------------------------------------------------------- drawing
@@ -333,7 +373,7 @@ def draw_erd(cv: Canvas, lay: Layout, link_tables: bool = False):
             type_w = min(_w(r.type, ROW_SIZE), b.w * 0.45)
             name_space = b.w - PAD - BADGE_W - type_w - 14 - PAD
             name = _truncate(r.name, ROW_SIZE, name_space, r.pk)
-            cv.text(b.x + PAD + BADGE_W, base, name, ROW_SIZE, t["ink"], bold=r.pk)
+            cv.text(b.x + PAD + BADGE_W, base, name, ROW_SIZE, t["muted" if r.note else "ink"], bold=r.pk)
             rtype = _truncate(r.type, ROW_SIZE, b.w * 0.45)
             cv.text(b.x + b.w - PAD, base, rtype, ROW_SIZE, t["muted"], anchor="end")
         # redraw border on top of alternating row fills

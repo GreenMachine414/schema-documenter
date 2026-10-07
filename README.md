@@ -81,15 +81,18 @@ from the Actions tab, or push a tag from the command line:
 git tag v1.0.0 && git push origin v1.0.0
 ```
 
-**Option B – build on your own machine** (needs Python 3.10+):
+**Option B – build on your own machine** (needs Python 3.10+). On Windows, double-click
+`build.bat`. On any system, the same steps by hand:
 
-```bat
-build.bat            :: Windows  -> dist\SchemaDocumenter.exe
-```
 ```bash
-./build.sh           # macOS    -> dist/SchemaDocumenter.app
-                     # Linux    -> dist/SchemaDocumenter
+python -m venv .venv
+.venv\Scripts\activate          # macOS / Linux: source .venv/bin/activate
+pip install -e ".[dev]"
+pyinstaller schemadoc.spec --noconfirm
 ```
+
+The result is `dist\SchemaDocumenter.exe` on Windows, `dist/SchemaDocumenter.app` on
+macOS and `dist/SchemaDocumenter` on Linux.
 
 The executable is unsigned. Windows SmartScreen may show "Windows protected your PC";
 choose *More info → Run anyway*. On macOS, right-click the app and choose *Open* the
@@ -98,21 +101,20 @@ first time. To avoid these prompts, sign the build with your own certificate.
 ## Running from source
 
 ```bash
-./run.sh             # macOS / Linux  (run.bat on Windows)
+python -m venv .venv
+.venv\Scripts\activate          # macOS / Linux: source .venv/bin/activate
+pip install -e .
+schema-documenter                # opens the window
 ```
 
-This creates a virtual environment on first run. On Linux you may need Tk first
-(`sudo apt install python3-tk`). To try it without a database server:
-
-```bash
-python scripts/make_sample_db.py      # creates sample.db, a small shop schema
-```
+On Linux you may need Tk first (`sudo apt install python3-tk`). To try it without a
+database server, run `python scripts/make_sample_db.py` to create `sample.db`, a small
+shop schema.
 
 ## Command line
 
-Passing arguments runs the command line instead of the window. This works when running
-from source (`./run.sh ...` or `python -m schemadoc ...` with `src` on the path, or after
-`pip install .` as `schemadoc`):
+After `pip install -e .` (see above), the `schemadoc` command documents tables without
+opening the window:
 
 ```bash
 schemadoc --url sqlite:///sample.db --list
@@ -125,18 +127,21 @@ schemadoc --url "postgresql://me:secret@db.local/app" --schema billing --all -o 
 ## Project layout
 
 ```
+pyproject.toml           dependencies (the only place they're listed)
+build.bat                one-click Windows build
 launcher.py              entry script used for the executable
 schemadoc.spec           PyInstaller build recipe
 src/schemadoc/
   gui.py                 Tkinter window
   cli.py                 command line
   connection.py          database types and connection URLs
-  introspect.py          reads tables, columns, keys, indexes via SQLAlchemy
+  introspect.py          reads tables, columns, keys, indexes via SQLAlchemy (batched)
   models.py              plain data classes shared by everything else
   erd.py                 diagram layout and painting (no Graphviz needed)
   canvas.py              SVG and PDF drawing backends for the diagram
   render_html.py         self-contained HTML report
   render_pdf.py          PDF report (ReportLab)
+  report.py              decides what the report says (shared by HTML and PDF)
   generate.py            ties reading and rendering together
 scripts/make_sample_db.py
 tests/                   pytest suite against the SQLite sample
@@ -148,8 +153,12 @@ tests/                   pytest suite against the SQLite sample
 - The diagram layout is built in, so no Graphviz or other system tools are required.
   Tables are placed on a grid with related tables kept near each other, and lines are
   routed through the gaps so they don't cross over tables.
-- In the PDF, the diagram gets its own page sized to fit it, so large schemas stay
-  readable when you zoom in. In the HTML page you can zoom and download the diagram as SVG.
+- In the PDF, every page is the same size. The diagram is arranged to suit a portrait page;
+  when it's too big to read on one page, it keeps a readable size and continues onto more
+  pages, split between rows of tables so no table is cut in half. In the HTML page you can
+  zoom and download the diagram as SVG.
+- Tables with more than 30 columns show their key columns first in the diagram, followed by
+  "+ N more columns". Every column is still listed in the table details.
 - The HTML report is a single file with no external requests, so it can be emailed or
   committed next to your code.
 - Connections give up after 10 seconds if the server doesn't answer, with a message
@@ -158,7 +167,7 @@ tests/                   pytest suite against the SQLite sample
 ## Development
 
 ```bash
-pip install -r requirements-dev.txt
+pip install -e ".[dev]"
 pytest
 ```
 

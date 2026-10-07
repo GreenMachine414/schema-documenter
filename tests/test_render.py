@@ -37,3 +37,53 @@ def test_edges_avoid_boxes(reader):
                 else:
                     hit = by1 < y1 < by2 and max(x1, x2) > bx1 and min(x1, x2) < bx2
                 assert not hit, (e.rel, (x1, y1, x2, y2))
+
+
+def test_layout_follows_requested_shape(reader):
+    doc = reader.read(ALL)
+    tall, wide = layout_erd(doc, aspect=0.75), layout_erd(doc, aspect=2.0)
+    assert tall.width / tall.height < wide.width / wide.height
+
+
+def test_pdf_pages_share_one_size(reader, tmp_path):
+    out = generate(reader, ALL, tmp_path / "doc.pdf", "pdf")
+    sizes = {tuple(round(float(v)) for v in p.mediabox[2:]) for p in PdfReader(str(out)).pages}
+    assert sizes == {(612, 792)}
+
+
+def test_long_tables_are_capped_but_keep_key_columns():
+    from schemadoc.erd import MAX_ROWS, _make_box
+    from schemadoc.models import Column, Table
+    cols = [Column(f"c{i}", "INTEGER", True) for i in range(100)]
+    cols[70] = Column("owner_id", "INTEGER", False, references="users.id")
+    box = _make_box(Table("wide", columns=cols))
+    names = [r.name for r in box.rows]
+    assert len(box.rows) == MAX_ROWS and "owner_id" in names
+    assert box.rows[-1].note and names[-1] == "+ 71 more columns"
+
+
+def test_big_diagrams_continue_on_more_pages(tmp_path):
+    import sqlite3
+    from schemadoc.introspect import SchemaReader
+    from schemadoc.render_pdf import _page_bands
+    db = tmp_path / "big.db"
+    con = sqlite3.connect(db)
+    for i in range(40):
+        ref = f", parent_id INTEGER REFERENCES t{i - 1}(id)" if i else ""
+        con.execute(f"CREATE TABLE t{i} (id INTEGER PRIMARY KEY{ref}, " +
+                    ", ".join(f"c{j} TEXT" for j in range(10)) + ")")
+    con.commit()
+    con.close()
+    r = SchemaReader(f"sqlite:///{db}")
+    doc = r.read(r.list_tables())
+    lay = layout_erd(doc, max_width=1000)
+    bands = _page_bands(lay, 1200)
+    assert len(bands) > 1
+    assert bands[0][0] == 0 and bands[-1][1] == lay.height
+    assert all(b - a <= 1200 for a, b in bands)
+    assert all(prev[1] == nxt[0] for prev, nxt in zip(bands, bands[1:]))  # no gaps or overlaps
+
+    out = generate(r, r.list_tables(), tmp_path / "big.pdf", "pdf")
+    text = [p.extract_text() for p in PdfReader(str(out)).pages]
+    assert any("Entity relationship diagram (page 2 of" in t for t in text)
+    r.close()
